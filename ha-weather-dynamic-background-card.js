@@ -846,6 +846,9 @@ class SkyRenderer {
     this.costEma = 0;
     this.running = false;
     this.lastFrame = 0;
+    this.lastWall = 0; // performance.now() of the last drawn frame, for the watchdog
+    this.goodFrames = 0;
+    this.warned = false;
     this.strike = null;
     this.nextStrike = 0;
     this.moonSprite = document.createElement("canvas");
@@ -896,6 +899,9 @@ class SkyRenderer {
   }
 
   resize() {
+    // a transient 0- or 1-px size (an Android WebView going to or from the background) would build zero-size
+    // canvases that throw on the next draw; keep the current size instead
+    if (this.w && (window.innerWidth <= 1 || window.innerHeight <= 1)) return;
     const w = window.innerWidth || 390;
     const h = window.innerHeight || 844;
     const q = this.mode.quality;
@@ -1099,7 +1105,19 @@ class SkyRenderer {
     if (this.running || !this.mode.animate || document.hidden || !this.el.isConnected) return;
     this.running = true;
     this.lastFrame = 0;
+    this.lastWall = performance.now();
     requestAnimationFrame(this._loop);
+  }
+
+  // The rAF chain can end without loop() clearing `running`: an exception in a frame, or a WebView that does not
+  // resume requestAnimationFrame after the page was paused while document.hidden never changed. Every kick() then
+  // returns early and the canvases stay on their last frame. Called from Manager.refresh() (every 60 s and on each
+  // hass update): a loop that claims to run but has not drawn for 5 s is restarted.
+  watchdog() {
+    if (this.running && !document.hidden && this.el.isConnected && performance.now() - this.lastWall > 5000) {
+      this.running = false;
+      this.kick();
+    }
   }
 
   stop() {
@@ -1155,13 +1173,32 @@ class SkyRenderer {
     const dt = this.lastFrame ? Math.min((t - this.lastFrame) / 1000, 0.1) : 1 / fps;
     this.lastFrame = t;
     const t0 = performance.now();
-    this.step(ts, dt);
-    this.draw(ts);
-    const cost = performance.now() - t0;
+    try {
+      this.step(ts, dt);
+      this.draw(ts);
+    } catch (e) {
+      // stop cleanly so the next kick() (scene change, visibility, watchdog) can restart the loop
+      this.running = false;
+      if (!this.warned) {
+        this.warned = true;
+        console.warn("weather-dynamic-background: a frame failed; the animation will restart", e);
+      }
+      return;
+    }
+    this.lastWall = performance.now();
+    const cost = this.lastWall - t0;
     this.costEma = this.costEma ? this.costEma * 0.95 + cost * 0.05 : cost;
     if (this.mode.quality === "auto" && this.costEma > 11 && this.mult > 0.35) {
       this.mult *= 0.75;
       this.costEma = 0;
+      this.goodFrames = 0;
+    } else if (this.mode.quality === "auto" && this.mult < 1) {
+      // win quality back after a slow patch (a GC pause, a busy dashboard) instead of staying reduced for good
+      this.goodFrames = this.costEma < 6 ? this.goodFrames + 1 : 0;
+      if (this.goodFrames >= 300) {
+        this.mult = Math.min(1, this.mult / 0.75);
+        this.goodFrames = 0;
+      }
     }
     const idle =
       !fast &&
@@ -1312,7 +1349,15 @@ class SkyRenderer {
       const r = mulberry(99);
       this.glass = Array.from({ length: Math.round(35 * this.cur.rain) }, () => ({ ...this.newGlassDrop(r, this.w, this.h), life: 2, max: 1e9 }));
     } else this.glass = [];
-    this.draw(12.3);
+    try {
+      this.draw(12.3);
+    } catch (e) {
+      // same guard as loop(): a failed still frame must not throw into Home Assistant's hass setter
+      if (!this.warned) {
+        this.warned = true;
+        console.warn("weather-dynamic-background: a still frame failed", e);
+      }
+    }
   }
 
   draw(ts) {
@@ -1805,7 +1850,18 @@ class Manager {
     scene.dim = dark ? ((num(this.config.dark_dim) ?? 40) / 100) * smooth(0.1, 0.45, scene.skyLum) : 0;
     scene.lift = dark ? 0 : ((num(this.config.light_lift) ?? 10) / 100) * scene.skyDark;
     this.scene = scene;
+    // a view rebuild (e.g. after a websocket reconnect) can leave the layer in a detached container, and while the
+    // socket is down no hass update arrives to repair it; re-attach to a card that is still on the page
+    if (this.renderer && !this.renderer.el.isConnected && this.device.enabled) {
+      for (const c of this.owners) {
+        if (c.isConnected) {
+          this.ensureAttached(c);
+          break;
+        }
+      }
+    }
     if (this.renderer && this.renderer.el.isConnected) {
+      this.renderer.watchdog();
       this.renderer.setMode(this.mode());
       this.renderer.setScene(scene);
       const s = document.documentElement.style;
