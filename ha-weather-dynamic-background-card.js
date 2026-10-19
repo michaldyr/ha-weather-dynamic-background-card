@@ -1106,7 +1106,7 @@ class SkyRenderer {
     this.running = true;
     this.lastFrame = 0;
     this.lastWall = performance.now();
-    requestAnimationFrame(this._loop);
+    this._raf = requestAnimationFrame(this._loop);
   }
 
   // The rAF chain can end without loop() clearing `running`: an exception in a frame, or a WebView that does not
@@ -1115,6 +1115,8 @@ class SkyRenderer {
   // hass update): a loop that claims to run but has not drawn for 5 s is restarted.
   watchdog() {
     if (this.running && !document.hidden && this.el.isConnected && performance.now() - this.lastWall > 5000) {
+      // cancel the stalled frame first, or it would resume as a second loop next to the new one
+      cancelAnimationFrame(this._raf);
       this.running = false;
       this.kick();
     }
@@ -1167,7 +1169,7 @@ class SkyRenderer {
     const fast = this.needsFast();
     const fps = fast ? (this.mode.quality === "high" ? 60 : this.mode.quality === "low" ? 24 : 30) : 20;
     if (this.lastFrame && t - this.lastFrame < 1000 / fps - 2) {
-      requestAnimationFrame(this._loop);
+      this._raf = requestAnimationFrame(this._loop);
       return;
     }
     const dt = this.lastFrame ? Math.min((t - this.lastFrame) / 1000, 0.1) : 1 / fps;
@@ -1213,7 +1215,7 @@ class SkyRenderer {
       this.running = false;
       return;
     }
-    requestAnimationFrame(this._loop);
+    this._raf = requestAnimationFrame(this._loop);
   }
 
   settled() {
