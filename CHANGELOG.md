@@ -1,5 +1,10 @@
 # Changelog
 
+## Unreleased
+
+### Fixes
+- Leaving the dashboard view now frees the background's canvases. The renderer was kept for the life of the page, so its full-screen layers and sprites held GPU memory after the view was left (about 165 MB on a 1920x1200 Fire HD 10). The next visit builds a fresh renderer, which regenerates the cloud decks.
+
 ## 1.6.0 – first public release
 
 ### Sky

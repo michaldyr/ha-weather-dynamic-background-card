@@ -884,6 +884,25 @@ class SkyRenderer {
     this.el.remove();
   }
 
+  // Frees the GPU backing of every canvas this renderer owns. A detached canvas keeps its (accelerated) backing
+  // store for as long as it is referenced, so without this the full-screen layers and sprites stay allocated
+  // after the dashboard leaves the view. Only called on a renderer that is being dropped.
+  release() {
+    this.stop();
+    // the cloud-deck generation chain and the cross-fade settle timer would otherwise run on after this,
+    // drawing into the zeroed canvases (an InvalidStateError per detach in still mode)
+    this._released = true;
+    clearTimeout(this._genTimer);
+    clearTimeout(this._settleTimer);
+    this._genBusy = false;
+    const sprites = [this.dropSprite, this.bokehSprite, this.flakeSprite, this.auroraSprite, this.moonSprite];
+    for (const d of this.deckImg) for (const k in d) sprites.push(d[k]);
+    for (const cv of [this.canvas, this.skyCanvas, this.cloudCanvas, this.glassCanvas, this.frostCanvas, ...sprites]) {
+      if (cv) cv.width = cv.height = 0;
+    }
+    this.deckImg = [{}, {}];
+  }
+
   setMode(mode) {
     const changed = JSON.stringify(mode) !== JSON.stringify(this.mode);
     this.mode = mode;
@@ -932,12 +951,14 @@ class SkyRenderer {
     if (this._genBusy || this.decks.every((d) => d.done)) return;
     this._genBusy = true;
     const run = () => {
+      this._genTimer = 0;
+      if (this._released) return;
       const more = this.genStep();
       if (!this.mode.animate) this.drawStatic();
-      if (more) setTimeout(run, 16);
+      if (more) this._genTimer = setTimeout(run, 16);
       else this._genBusy = false;
     };
-    setTimeout(run, 50);
+    this._genTimer = setTimeout(run, 50);
   }
 
   ensureFrost() {
@@ -1669,7 +1690,12 @@ class Manager {
 
   detach() {
     this.observer.disconnect();
-    if (this.renderer) this.renderer.unmount();
+    if (this.renderer) {
+      // drop the renderer rather than keep it for the next attach: its canvases hold GPU memory while referenced
+      this.renderer.unmount();
+      this.renderer.release();
+      this.renderer = null;
+    }
     this.container = null;
     const s = document.documentElement.style;
     for (const v of ["--wbg-active", "--wbg-sky-dark", "--wbg-sky-light", "--wbg-reduce-transparency"]) s.removeProperty(v);
